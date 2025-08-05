@@ -64,7 +64,6 @@ local utils = require("git-conflict.utils")
 --- @class GitConflictConfig
 --- @field default_mappings GitConflictMappings
 --- @field default_commands boolean
---- @field disable_diagnostics boolean
 --- @field list_opener string|function
 --- @field highlights ConflictHighlights
 --- @field debug boolean
@@ -72,7 +71,6 @@ local utils = require("git-conflict.utils")
 --- @class GitConflictUserConfig
 --- @field default_mappings? boolean|GitConflictMappings
 --- @field default_commands? boolean
---- @field disable_diagnostics? boolean
 --- @field list_opener? string|function
 --- @field highlights? ConflictHighlights
 --- @field debug? boolean
@@ -135,7 +133,6 @@ local config = {
     debug = false,
     default_mappings = DEFAULT_MAPPINGS,
     default_commands = true,
-    disable_diagnostics = false,
     list_opener = "copen",
     highlights = {
         current = "DiffText",
@@ -166,23 +163,16 @@ local state = {
 
 -----------------------------------------------------------------------------//
 
----Get full path to the repository of the directory passed in
----@param dir any
----@param callback fun(data: string)
-local function get_git_root(dir, callback)
-    utils.job({ "git", "-C", dir, "rev-parse", "--show-toplevel" }, function(data)
-        callback(data[1])
-    end)
-end
-
 --- Get a list of the conflicted files within the specified directory
 --- NOTE: only conflicted files within the git repository of the directory passed in are returned
 --- also we add a line prefix to the git command so that the full path is returned
 --- e.g. --line-prefix=`git rev-parse --show-toplevel`
 ---@reference: https://stackoverflow.com/a/10874862
----@param dir string?
+---@param bufnr integer
 ---@param callback fun(files: table<string, integer[]>, string)
-local function get_conflicted_files(dir, callback)
+local function get_conflicted_files(bufnr, callback)
+    local dir = vim.fs.root(bufnr, ".git")
+
     local cmd = {
         "git",
         "-C",
@@ -322,14 +312,14 @@ local function detect_conflicts(lines)
                 ancestor = {},
             }
         end
-        if has_start and line:match(conflict_ancestor) then
+        if position and has_start and line:match(conflict_ancestor) then
             has_ancestor = true
             position.ancestor.range_start = lnum
             position.ancestor.content_start = lnum + 1
             position.current.range_end = lnum - 1
             position.current.content_end = lnum - 1
         end
-        if has_start and line:match(conflict_middle) then
+        if position and has_start and line:match(conflict_middle) then
             has_middle = true
             if has_ancestor then
                 position.ancestor.content_end = lnum - 1
@@ -343,7 +333,7 @@ local function detect_conflicts(lines)
             position.incoming.range_start = lnum + 1
             position.incoming.content_start = lnum + 1
         end
-        if has_start and has_middle and line:match(conflict_end) then
+        if position and has_start and has_middle and line:match(conflict_end) then
             position.incoming.range_end = lnum
             position.incoming.content_end = lnum - 1
             positions[#positions + 1] = position
@@ -440,23 +430,22 @@ end
 --- a different repository in which case extmarks could be cleared for unrelated projects
 local function fetch_conflicts(buf)
     buf = (buf and vim.api.nvim_buf_is_valid(buf)) and buf or vim.api.nvim_get_current_buf()
-    get_git_root(vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":h"), function(git_root)
-        get_conflicted_files(git_root, function(files, repo)
-            for name, b in pairs(visited_buffers) do
-                -- FIXME: this will not work for nested repositories
-                if vim.startswith(name, repo) and not files[name] and b.bufnr then
-                    visited_buffers[name] = nil
-                    M.clear(b.bufnr)
-                end
+
+    get_conflicted_files(buf, function(files, repo)
+        for name, b in pairs(visited_buffers) do
+            -- FIXME: this will not work for nested repositories
+            if vim.startswith(name, repo) and not files[name] and b.bufnr then
+                visited_buffers[name] = nil
+                M.clear(b.bufnr)
             end
-            for path, _ in pairs(files) do
-                visited_buffers[path] = visited_buffers[path] or {}
-            end
-        end)
+        end
+        for path, _ in pairs(files) do
+            visited_buffers[path] = visited_buffers[path] or {}
+        end
     end)
 end
 
----@type table<string, userdata>
+---@type table<string, uv.uv_fs_event_t?>
 local watchers = {}
 
 local on_throttled_change = utils.throttle(1000, function(dir, err, change)
@@ -517,11 +506,10 @@ end
 -----------------------------------------------------------------------------//
 
 local function set_commands()
-    local command = vim.api.nvim_create_user_command
-    command("GitConflictRefresh", function()
+    vim.api.nvim_create_user_command("GitConflictRefresh", function()
         fetch_conflicts()
     end, { nargs = 0 })
-    command("GitConflictListQf", function()
+    vim.api.nvim_create_user_command("GitConflictListQf", function()
         M.conflicts_to_qf_items(function(items)
             if #items > 0 then
                 vim.fn.setqflist(items, "r")
@@ -533,13 +521,13 @@ local function set_commands()
             end
         end)
     end, { nargs = 0 })
-    command("GitConflictChooseOurs", "<Plug>(git-conflict-ours)", { nargs = 0 })
-    command("GitConflictChooseTheirs", "<Plug>(git-conflict-theirs)", { nargs = 0 })
-    command("GitConflictChooseBoth", "<Plug>(git-conflict-both)", { nargs = 0 })
-    command("GitConflictChooseBase", "<Plug>(git-conflict-base)", { nargs = 0 })
-    command("GitConflictChooseNone", "<Plug>(git-conflict-none)", { nargs = 0 })
-    command("GitConflictNextConflict", "<Plug>(git-conflict-next-conflict)", { nargs = 0 })
-    command("GitConflictPrevConflict", "<Plug>(git-conflict-prev-conflict)", { nargs = 0 })
+    vim.api.nvim_create_user_command("GitConflictChooseOurs", "<Plug>(git-conflict-ours)", { nargs = 0 })
+    vim.api.nvim_create_user_command("GitConflictChooseTheirs", "<Plug>(git-conflict-theirs)", { nargs = 0 })
+    vim.api.nvim_create_user_command("GitConflictChooseBoth", "<Plug>(git-conflict-both)", { nargs = 0 })
+    vim.api.nvim_create_user_command("GitConflictChooseBase", "<Plug>(git-conflict-base)", { nargs = 0 })
+    vim.api.nvim_create_user_command("GitConflictChooseNone", "<Plug>(git-conflict-none)", { nargs = 0 })
+    vim.api.nvim_create_user_command("GitConflictNextConflict", "<Plug>(git-conflict-next-conflict)", { nargs = 0 })
+    vim.api.nvim_create_user_command("GitConflictPrevConflict", "<Plug>(git-conflict-prev-conflict)", { nargs = 0 })
 end
 
 -----------------------------------------------------------------------------//
@@ -584,7 +572,6 @@ local function setup_buffer_mappings(bufnr)
     vim.keymap.set({ "n", "v" }, config.default_mappings.none, "<Plug>(git-conflict-none)", opts("Choose None"))
     vim.keymap.set({ "n", "v" }, config.default_mappings.theirs, "<Plug>(git-conflict-theirs)", opts("Choose Theirs"))
     vim.keymap.set({ "v", "v" }, config.default_mappings.ours, "<Plug>(git-conflict-ours)", opts("Choose Ours"))
-    -- map('V', config.default_mappings.ours, '<Plug>(git-conflict-ours)', opts('Choose Ours'))
     vim.keymap.set("n", config.default_mappings.prev, "<Plug>(git-conflict-prev-conflict)", opts("Previous Conflict"))
     vim.keymap.set("n", config.default_mappings.next, "<Plug>(git-conflict-next-conflict)", opts("Next Conflict"))
     vim.b[bufnr].conflict_mappings_set = true
@@ -693,9 +680,6 @@ function M.setup(user_config)
         pattern = "GitConflictDetected",
         callback = function()
             local bufnr = vim.api.nvim_get_current_buf()
-            if config.disable_diagnostics then
-                vim.diagnostic.disable(bufnr)
-            end
             if config.default_mappings then
                 setup_buffer_mappings(bufnr)
             end
@@ -707,9 +691,6 @@ function M.setup(user_config)
         pattern = "GitConflictResolved",
         callback = function()
             local bufnr = vim.api.nvim_get_current_buf()
-            if config.disable_diagnostics then
-                vim.diagnostic.enable(bufnr)
-            end
             if config.default_mappings then
                 clear_buffer_mappings(bufnr)
             end
@@ -891,24 +872,6 @@ function M.choose(side)
         vim.api.nvim_buf_del_extmark(0, NAMESPACE, position.marks.ancestor.label)
     end
     parse_buffer(bufnr)
-end
-
-function M.debug_watchers()
-    vim.pretty_print({ watchers = watchers })
-end
-
-function M.conflict_count(bufnr)
-    if bufnr and not vim.api.nvim_buf_is_valid(bufnr) then
-        return 0
-    end
-    bufnr = bufnr or 0
-
-    local name = vim.api.nvim_buf_get_name(bufnr)
-    if not visited_buffers[name] then
-        return 0
-    end
-
-    return #visited_buffers[name].positions
 end
 
 return M
