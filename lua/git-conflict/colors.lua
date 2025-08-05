@@ -23,7 +23,7 @@ end
 ---@source https://stackoverflow.com/q/5560248
 ---@see: https://stackoverflow.com/a/37797380
 ---Darken a specified hex color
----@param color string
+---@param color number
 ---@param percent number
 ---@return string
 function M.shade_color(color, percent)

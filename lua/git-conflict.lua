@@ -182,18 +182,21 @@ local function get_conflicted_files(bufnr, callback)
         "--name-only",
         "--diff-filter=U",
     }
-    utils.job(cmd, function(data)
-        local files = {}
-        for _, filename in ipairs(data) do
-            if IS_WINDOWS then
-                filename = filename:gsub("/", sep)
+    vim.fn.jobstart(cmd, {
+        stdout_buffered = true,
+        on_stdout = function(_, data, _)
+            local files = {}
+            for _, filename in ipairs(data) do
+                if IS_WINDOWS then
+                    filename = filename:gsub("/", sep)
+                end
+                if #filename > 0 then
+                    files[filename] = files[filename] or {}
+                end
             end
-            if #filename > 0 then
-                files[filename] = files[filename] or {}
-            end
-        end
-        callback(files, dir)
-    end)
+            callback(files, dir)
+        end,
+    })
 end
 
 ---Add the positions to the buffer in our in memory buffer list
@@ -606,9 +609,9 @@ local function set_highlights(highlights)
     local current_color = utils.get_hl(highlights.current)
     local incoming_color = utils.get_hl(highlights.incoming)
     local ancestor_color = utils.get_hl(highlights.ancestor)
-    local current_bg = current_color.background or DEFAULT_CURRENT_BG_COLOR
-    local incoming_bg = incoming_color.background or DEFAULT_INCOMING_BG_COLOR
-    local ancestor_bg = ancestor_color.background or DEFAULT_ANCESTOR_BG_COLOR
+    local current_bg = current_color.bg or DEFAULT_CURRENT_BG_COLOR
+    local incoming_bg = incoming_color.bg or DEFAULT_INCOMING_BG_COLOR
+    local ancestor_bg = ancestor_color.bg or DEFAULT_ANCESTOR_BG_COLOR
     local current_label_bg = color.shade_color(current_bg, 60)
     local incoming_label_bg = color.shade_color(incoming_bg, 60)
     local ancestor_label_bg = color.shade_color(ancestor_bg, 60)
