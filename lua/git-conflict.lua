@@ -293,16 +293,13 @@ end
 -----------------------------------------------------------------------------//
 
 local function set_highlights()
-    local diff_text = vim.api.nvim_get_hl(0, { name = "DiffText" })
-    local diff_add = vim.api.nvim_get_hl(0, { name = "DiffAdd" })
-
-    vim.api.nvim_set_hl(0, CURRENT_HL, { background = diff_text.bg, default = true })
-    vim.api.nvim_set_hl(0, INCOMING_HL, { background = diff_add.bg, default = true })
+    vim.api.nvim_set_hl(0, CURRENT_HL, { link = "DiffText", default = true })
+    vim.api.nvim_set_hl(0, INCOMING_HL, { link = "DiffAdd", default = true })
     vim.api.nvim_set_hl(0, ANCESTOR_HL, { background = 6824314, default = true })
 
-    local current_hl = vim.api.nvim_get_hl(0, { name = CURRENT_HL })
-    local incoming_hl = vim.api.nvim_get_hl(0, { name = INCOMING_HL })
-    local ancestor_hl = vim.api.nvim_get_hl(0, { name = ANCESTOR_HL })
+    local current_hl = vim.api.nvim_get_hl(0, { name = CURRENT_HL, link = false })
+    local incoming_hl = vim.api.nvim_get_hl(0, { name = INCOMING_HL, link = false })
+    local ancestor_hl = vim.api.nvim_get_hl(0, { name = ANCESTOR_HL, link = false })
 
     vim.api.nvim_set_hl(0, CURRENT_LABEL_HL, { background = shade_color(current_hl.bg, 60), default = true })
     vim.api.nvim_set_hl(0, INCOMING_LABEL_HL, { background = shade_color(incoming_hl.bg, 60), default = true })
