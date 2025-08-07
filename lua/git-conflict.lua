@@ -36,7 +36,6 @@ local M = {}
 --- @field incoming Range
 --- @field current Range
 --- @field ancestor Range
---- @field marks PositionMarks
 
 --- @class ConflictBufferCache
 --- @field positions ConflictPosition[]
@@ -178,20 +177,15 @@ local function highlight_conflicts(bufnr, positions, lines)
         local current_label = string.format("%s (Current changes)", lines[position.current.range_start + 1])
         local incoming_label = string.format("%s (Incoming changes)", lines[position.incoming.range_end + 1])
 
-        local curr_label_id = draw_section_label(bufnr, CURRENT_LABEL_HL, current_label, position.current.range_start)
+        draw_section_label(bufnr, CURRENT_LABEL_HL, current_label, position.current.range_start)
         hl_range(bufnr, CURRENT_HL, position.current.range_start, position.current.range_end + 1)
         hl_range(bufnr, INCOMING_HL, position.incoming.range_start, position.incoming.range_end + 1)
-        local inc_label_id = draw_section_label(bufnr, INCOMING_LABEL_HL, incoming_label, position.incoming.range_end)
+        draw_section_label(bufnr, INCOMING_LABEL_HL, incoming_label, position.incoming.range_end)
 
-        position.marks = {
-            current = { label = curr_label_id },
-            incoming = { label = inc_label_id },
-        }
         if not vim.tbl_isempty(position.ancestor) then
             local ancestor_label = string.format("%s (Base changes)", lines[position.ancestor.range_start + 1])
             hl_range(bufnr, ANCESTOR_HL, position.ancestor.range_start + 1, position.ancestor.range_end + 1)
-            local label_id = draw_section_label(bufnr, ANCESTOR_LABEL_HL, ancestor_label, position.ancestor.range_start)
-            position.marks.ancestor = { label = label_id }
+            draw_section_label(bufnr, ANCESTOR_LABEL_HL, ancestor_label, position.ancestor.range_start)
         end
     end
 end
@@ -366,13 +360,6 @@ local function insert_lines(positions, side)
 
         vim.api.nvim_buf_set_lines(0, pos_start, pos_end, false, lines)
         vim.api.nvim_buf_clear_namespace(0, NAMESPACE, pos_start, pos_end)
-
-        vim.api.nvim_buf_set_lines(0, pos_start, pos_end, false, lines)
-        vim.api.nvim_buf_del_extmark(0, NAMESPACE, pos.marks.incoming.label)
-        vim.api.nvim_buf_del_extmark(0, NAMESPACE, pos.marks.current.label)
-        if pos.marks.ancestor.label then
-            vim.api.nvim_buf_del_extmark(0, NAMESPACE, pos.marks.ancestor.label)
-        end
     end
 end
 
