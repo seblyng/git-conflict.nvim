@@ -25,12 +25,11 @@ local M = {}
 
 ---@class RangeMark
 ---@field label integer
----@field content string
 
 --- @class PositionMarks
 --- @field current RangeMark
 --- @field incoming RangeMark
---- @field ancestor RangeMark
+--- @field ancestor RangeMark?
 
 --- @class Range
 --- @field range_start integer
@@ -40,12 +39,11 @@ local M = {}
 
 --- @class ConflictPosition
 --- @field incoming Range
---- @field middle Range
 --- @field current Range
+--- @field ancestor Range
 --- @field marks PositionMarks
 
 --- @class ConflictBufferCache
---- @field lines table<integer, boolean> map of conflicted line numbers
 --- @field positions ConflictPosition[]
 --- @field tick integer
 --- @field bufnr integer
@@ -92,7 +90,6 @@ local ANCESTOR_HL = "GitConflictAncestor"
 local CURRENT_LABEL_HL = "GitConflictCurrentLabel"
 local INCOMING_LABEL_HL = "GitConflictIncomingLabel"
 local ANCESTOR_LABEL_HL = "GitConflictAncestorLabel"
-local PRIORITY = vim.hl.priorities.user
 local NAMESPACE = vim.api.nvim_create_namespace("git-conflict")
 
 local conflict_start = "^<<<<<<<"
@@ -116,13 +113,8 @@ local config = {
 
 --- A list of buffers that have conflicts in them. This is derived from
 --- git using the diff command, and updated at intervals
-local visited_buffers = setmetatable({}, {
-    __index = function(t, k)
-        if type(k) == "number" then
-            return t[vim.api.nvim_buf_get_name(k)]
-        end
-    end,
-})
+---@type table<string, ConflictBufferCache>
+local visited_buffers = {}
 
 -----------------------------------------------------------------------------//
 
@@ -168,11 +160,16 @@ local function update_visited_buffers(buf, positions)
     local name = vim.api.nvim_buf_get_name(buf)
     -- If this buffer is not in the list
     if not visited_buffers[name] then
-        visited_buffers[name] = {}
+        visited_buffers[name] = {
+            bufnr = buf,
+            tick = vim.b[buf].changedtick,
+            positions = positions,
+        }
+    else
+        visited_buffers[name].bufnr = buf
+        visited_buffers[name].tick = vim.b[buf].changedtick
+        visited_buffers[name].positions = positions
     end
-    visited_buffers[name].bufnr = buf
-    visited_buffers[name].tick = vim.b[buf].changedtick
-    visited_buffers[name].positions = positions
 end
 
 ---Set an extmark for each section of the git conflict
@@ -190,7 +187,7 @@ local function hl_range(bufnr, hl, range_start, range_end)
         hl_eol = true,
         hl_mode = "combine",
         end_row = range_end,
-        priority = PRIORITY,
+        priority = vim.hl.priorities.user,
     })
 end
 
@@ -211,42 +208,35 @@ local function draw_section_label(bufnr, hl_group, label, lnum)
         hl_group = hl_group,
         virt_text = { { label .. string.rep(" ", remaining_space), hl_group } },
         virt_text_pos = "overlay",
-        priority = PRIORITY,
+        priority = vim.hl.priorities.user,
     })
 end
 
 ---Highlight each part of a git conflict i.e. the incoming changes vs the current/HEAD changes
 ---TODO: should extmarks be ephemeral? or is it less expensive to save them and only re-apply
 ---them when a buffer changes since otherwise we have to reparse the whole buffer constantly
----@param positions table
+---@param positions ConflictPosition[]
 ---@param lines string[]
 local function highlight_conflicts(bufnr, positions, lines)
     for _, position in ipairs(positions) do
-        local current_start = position.current.range_start
-        local current_end = position.current.range_end
-        local incoming_start = position.incoming.range_start
-        local incoming_end = position.incoming.range_end
         -- Add one since the index access in lines is 1 based
-        local current_label = lines[current_start + 1] .. " (Current changes)"
-        local incoming_label = lines[incoming_end + 1] .. " (Incoming changes)"
+        local current_label = string.format("%s (Current changes)", lines[position.current.range_start + 1])
+        local incoming_label = string.format("%s (Incoming changes)", lines[position.incoming.range_end + 1])
 
-        local curr_label_id = draw_section_label(bufnr, CURRENT_LABEL_HL, current_label, current_start)
-        local curr_id = hl_range(bufnr, CURRENT_HL, current_start, current_end + 1)
-        local inc_id = hl_range(bufnr, INCOMING_HL, incoming_start, incoming_end + 1)
-        local inc_label_id = draw_section_label(bufnr, INCOMING_LABEL_HL, incoming_label, incoming_end)
+        local curr_label_id = draw_section_label(bufnr, CURRENT_LABEL_HL, current_label, position.current.range_start)
+        hl_range(bufnr, CURRENT_HL, position.current.range_start, position.current.range_end + 1)
+        hl_range(bufnr, INCOMING_HL, position.incoming.range_start, position.incoming.range_end + 1)
+        local inc_label_id = draw_section_label(bufnr, INCOMING_LABEL_HL, incoming_label, position.incoming.range_end)
 
         position.marks = {
-            current = { label = curr_label_id, content = curr_id },
-            incoming = { label = inc_label_id, content = inc_id },
-            ancestor = {},
+            current = { label = curr_label_id },
+            incoming = { label = inc_label_id },
         }
         if not vim.tbl_isempty(position.ancestor) then
-            local ancestor_start = position.ancestor.range_start
-            local ancestor_end = position.ancestor.range_end
-            local ancestor_label = lines[ancestor_start + 1] .. " (Base changes)"
-            local id = hl_range(bufnr, ANCESTOR_HL, ancestor_start + 1, ancestor_end + 1)
-            local label_id = draw_section_label(bufnr, ANCESTOR_LABEL_HL, ancestor_label, ancestor_start)
-            position.marks.ancestor = { label = label_id, content = id }
+            local ancestor_label = string.format("%s (Base changes)", lines[position.ancestor.range_start + 1])
+            hl_range(bufnr, ANCESTOR_HL, position.ancestor.range_start + 1, position.ancestor.range_end + 1)
+            local label_id = draw_section_label(bufnr, ANCESTOR_LABEL_HL, ancestor_label, position.ancestor.range_start)
+            position.marks.ancestor = { label = label_id }
         end
     end
 end
@@ -254,7 +244,6 @@ end
 ---Iterate through the buffer line by line checking there is a matching conflict marker
 ---when we find a starting mark we collect the position details and add it to a list of positions
 ---@param lines string[]
----@return boolean
 ---@return ConflictPosition[]
 local function detect_conflicts(lines)
     local positions = {}
@@ -265,7 +254,6 @@ local function detect_conflicts(lines)
             has_start = true
             position = {
                 current = { range_start = lnum, content_start = lnum + 1 },
-                middle = {},
                 incoming = {},
                 ancestor = {},
             }
@@ -286,8 +274,6 @@ local function detect_conflicts(lines)
                 position.current.range_end = lnum - 1
                 position.current.content_end = lnum - 1
             end
-            position.middle.range_start = lnum
-            position.middle.range_end = lnum + 1
             position.incoming.range_start = lnum + 1
             position.incoming.content_start = lnum + 1
         end
@@ -299,7 +285,7 @@ local function detect_conflicts(lines)
             position, has_start, has_middle, has_ancestor = nil, false, false, false
         end
     end
-    return #positions > 0, positions
+    return positions
 end
 
 -----------------------------------------------------------------------------//
@@ -344,12 +330,12 @@ end
 ---@param bufnr integer
 local function parse_buffer(bufnr)
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local has_conflict, positions = detect_conflicts(lines)
+    local conflicts = detect_conflicts(lines)
 
-    update_visited_buffers(bufnr, positions)
+    update_visited_buffers(bufnr, conflicts)
     vim.api.nvim_buf_clear_namespace(bufnr, NAMESPACE, 0, -1)
-    if has_conflict then
-        highlight_conflicts(bufnr, positions, lines)
+    if #conflicts > 0 then
+        highlight_conflicts(bufnr, conflicts, lines)
         setup_buffer_mappings(bufnr)
     else
         clear_buffer_mappings(bufnr)
@@ -379,14 +365,6 @@ end
 
 ---@param user_config GitConflictUserConfig
 function M.setup(user_config)
-    if vim.fn.executable("git") <= 0 then
-        return vim.schedule(function()
-            vim.notify_once("You need to have git installed in order to use this plugin", vim.log.levels.ERROR, {
-                title = "Git Conflict",
-            })
-        end)
-    end
-
     config = vim.tbl_deep_extend("force", config, user_config or {})
 
     set_highlights()
@@ -433,7 +411,8 @@ function M.setup(user_config)
 
     vim.api.nvim_set_decoration_provider(NAMESPACE, {
         on_win = function(_, _, bufnr, _, _)
-            if visited_buffers[bufnr] and visited_buffers[bufnr].tick ~= vim.b[bufnr].changedtick then
+            local bufname = vim.api.nvim_buf_get_name(bufnr)
+            if visited_buffers[bufname] and visited_buffers[bufname].tick ~= vim.b[bufnr].changedtick then
                 parse_buffer(bufnr)
             end
         end,
@@ -479,7 +458,8 @@ function M.conflicts_to_qf_items(callback)
 end
 
 function M.find_next()
-    local match = visited_buffers[0]
+    local bufname = vim.api.nvim_buf_get_name(0)
+    local match = visited_buffers[bufname]
     if not match then
         return
     end
@@ -495,7 +475,8 @@ function M.find_next()
 end
 
 function M.find_prev()
-    local match = visited_buffers[0]
+    local bufname = vim.api.nvim_buf_get_name(0)
+    local match = visited_buffers[bufname]
     if not match then
         return
     end
@@ -510,6 +491,9 @@ function M.find_prev()
     end
 end
 
+---@param bufnr integer
+---@param position ConflictPosition
+---@param side ConflictSide
 local function foo(bufnr, position, side)
     local lines = {}
     if vim.tbl_contains({ SIDES.OURS, SIDES.THEIRS, SIDES.BASE }, side) then
@@ -533,7 +517,7 @@ local function foo(bufnr, position, side)
     vim.api.nvim_buf_set_lines(0, pos_start, pos_end, false, lines)
     vim.api.nvim_buf_del_extmark(0, NAMESPACE, position.marks.incoming.label)
     vim.api.nvim_buf_del_extmark(0, NAMESPACE, position.marks.current.label)
-    if position.marks.ancestor.label then
+    if position.marks.ancestor then
         vim.api.nvim_buf_del_extmark(0, NAMESPACE, position.marks.ancestor.label)
     end
     parse_buffer(bufnr)
@@ -543,7 +527,8 @@ end
 ---@param side ConflictSide
 function M.choose(side)
     local bufnr = vim.api.nvim_get_current_buf()
-    local match = visited_buffers[bufnr]
+    local bufname = vim.api.nvim_buf_get_name(bufnr)
+    local match = visited_buffers[bufname]
     if not match then
         return
     end
