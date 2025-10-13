@@ -355,7 +355,6 @@ local function choose(side)
         vim.defer_fn(function()
             local start = vim.api.nvim_buf_get_mark(0, "<")[1]
             local finish = vim.api.nvim_buf_get_mark(0, ">")[1]
-            print("start", start, "finish", finish)
             local positions = vim.iter(conflicts)
                 :filter(function(pos)
                     return pos.current.range_start >= start - 1 and pos.incoming.range_end <= finish + 1
