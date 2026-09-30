@@ -18,14 +18,6 @@ local M = {}
 
 ---@alias ConflictSide "'ours'"|"'theirs'"|"'both'"|"'base'"|"'none'"
 
----@class RangeMark
----@field label integer
-
---- @class PositionMarks
---- @field current RangeMark
---- @field incoming RangeMark
---- @field ancestor RangeMark?
-
 --- @class Range
 --- @field range_start integer
 --- @field range_end integer
@@ -46,10 +38,10 @@ local M = {}
 --- @field prev string
 
 --- @class GitConflictConfig
---- @field default_mappings GitConflictMappings
+--- @field default_mappings GitConflictMappings|false
 
 --- @class GitConflictUserConfig
---- @field default_mappings? GitConflictMappings
+--- @field default_mappings? GitConflictMappings|false
 
 -----------------------------------------------------------------------------//
 -- Constants
@@ -80,9 +72,14 @@ local config = {
     },
 }
 
---- A table of buffers that have conflicts in them mapped to their changedtick.
----@type table<string, integer>
-local visited_buffers_tick = {}
+local mappings = {
+    { key = "ours", modes = { "n", "v" }, plug = "<Plug>(git-conflict-ours)" },
+    { key = "theirs", modes = { "n", "v" }, plug = "<Plug>(git-conflict-theirs)" },
+    { key = "both", modes = { "n", "v" }, plug = "<Plug>(git-conflict-both)" },
+    { key = "none", modes = { "n", "v" }, plug = "<Plug>(git-conflict-none)" },
+    { key = "prev", modes = { "n" }, plug = "<Plug>(git-conflict-prev-conflict)" },
+    { key = "next", modes = { "n" }, plug = "<Plug>(git-conflict-next-conflict)" },
+}
 
 -----------------------------------------------------------------------------//
 
@@ -93,28 +90,14 @@ local visited_buffers_tick = {}
 ---@param percent number
 ---@return string
 local function shade_color(color, percent)
-    --- Returns a table containing the RGB values encoded inside 24 least
-    --- significant bits of the number @rgb_24bit
-    local function decode_24bit_rgb(rgb_24bit)
-        local bit = require("bit")
-        return {
-            r = bit.band(bit.rshift(rgb_24bit, 16), 255),
-            g = bit.band(bit.rshift(rgb_24bit, 8), 255),
-            b = bit.band(rgb_24bit, 255),
-        }
-    end
-
-    local function alter(attr, p)
-        return math.floor(attr * (100 + p) / 100)
-    end
-
-    local rgb = decode_24bit_rgb(color)
-    if not rgb.r or not rgb.g or not rgb.b then
+    if not color then
         return "NONE"
     end
-    local r, g, b = alter(rgb.r, percent), alter(rgb.g, percent), alter(rgb.b, percent)
-    r, g, b = math.min(r, 255), math.min(g, 255), math.min(b, 255)
-    return string.format("#%02x%02x%02x", r, g, b)
+    local function channel(shift)
+        local value = math.floor(color / 2 ^ shift) % 256
+        return math.min(math.floor(value * (100 + percent) / 100), 255)
+    end
+    return string.format("#%02x%02x%02x", channel(16), channel(8), channel(0))
 end
 
 ---Set an extmark for each section of the git conflict
@@ -187,42 +170,26 @@ end
 ---@return ConflictPosition[]
 local function detect_conflicts(lines)
     local positions = {}
-    local position, has_start, has_middle, has_ancestor = nil, false, false, false
+    local position, section
     for index, line in ipairs(lines) do
         local lnum = index - 1
         if line:match(conflict_start) then
-            has_start = true
-            position = {
-                current = { range_start = lnum, content_start = lnum + 1 },
-                incoming = {},
-                ancestor = {},
-            }
-        end
-        if position and has_start and line:match(conflict_ancestor) then
-            has_ancestor = true
-            position.ancestor.range_start = lnum
-            position.ancestor.content_start = lnum + 1
-            position.current.range_end = lnum - 1
-            position.current.content_end = lnum - 1
-        end
-        if position and has_start and line:match(conflict_middle) then
-            has_middle = true
-            if has_ancestor then
-                position.ancestor.content_end = lnum - 1
-                position.ancestor.range_end = lnum - 1
-            else
-                position.current.range_end = lnum - 1
-                position.current.content_end = lnum - 1
-            end
-            position.incoming.range_start = lnum + 1
-            position.incoming.content_start = lnum + 1
-        end
-        if position and has_start and has_middle and line:match(conflict_end) then
+            position = { current = { range_start = lnum, content_start = lnum + 1 }, incoming = {}, ancestor = {} }
+            section = position.current
+        elseif position and section == position.current and line:match(conflict_ancestor) then
+            section.range_end, section.content_end = lnum - 1, lnum - 1
+            position.ancestor = { range_start = lnum, content_start = lnum + 1 }
+            section = position.ancestor
+        elseif position and section ~= position.incoming and line:match(conflict_middle) then
+            section.range_end, section.content_end = lnum - 1, lnum - 1
+            position.incoming = { range_start = lnum + 1, content_start = lnum + 1 }
+            section = position.incoming
+        elseif position and section == position.incoming and line:match(conflict_end) then
             position.incoming.range_end = lnum
             position.incoming.content_end = lnum - 1
             positions[#positions + 1] = position
 
-            position, has_start, has_middle, has_ancestor = nil, false, false, false
+            position, section = nil, nil
         end
     end
     return positions
@@ -232,27 +199,24 @@ end
 -- Mappings
 -----------------------------------------------------------------------------//
 
-local function setup_buffer_mappings(bufnr)
-    local function opts(desc)
-        return { silent = true, buffer = bufnr, desc = "Git Conflict: " .. desc, nowait = true }
+local function setup_buffer_mappings(buf)
+    if not config.default_mappings or vim.b[buf].conflict_mappings_set then
+        return
     end
-
-    vim.keymap.set({ "n", "v" }, config.default_mappings.ours, "<Plug>(git-conflict-ours)", opts("Choose Ours"))
-    vim.keymap.set({ "n", "v" }, config.default_mappings.both, "<Plug>(git-conflict-both)", opts("Choose Both"))
-    vim.keymap.set({ "n", "v" }, config.default_mappings.none, "<Plug>(git-conflict-none)", opts("Choose None"))
-    vim.keymap.set({ "n", "v" }, config.default_mappings.theirs, "<Plug>(git-conflict-theirs)", opts("Choose Theirs"))
-    vim.keymap.set({ "v", "v" }, config.default_mappings.ours, "<Plug>(git-conflict-ours)", opts("Choose Ours"))
-    vim.keymap.set("n", config.default_mappings.prev, "<Plug>(git-conflict-prev-conflict)", opts("Previous Conflict"))
-    vim.keymap.set("n", config.default_mappings.next, "<Plug>(git-conflict-next-conflict)", opts("Next Conflict"))
-    vim.b[bufnr].conflict_mappings_set = true
+    for _, m in ipairs(mappings) do
+        vim.keymap.set(m.modes, config.default_mappings[m.key], m.plug, { silent = true, buffer = buf, nowait = true })
+    end
+    vim.b[buf].conflict_mappings_set = true
 end
 
 local function clear_buffer_mappings(bufnr)
     if not vim.b[bufnr].conflict_mappings_set then
         return
     end
-    for _, mapping in pairs(config.default_mappings) do
-        vim.keymap.del("n", mapping, { buffer = bufnr })
+    for _, mapping in ipairs(mappings) do
+        for _, mode in ipairs(mapping.modes) do
+            vim.keymap.del(mode, config.default_mappings[mapping.key], { buffer = bufnr })
+        end
     end
     vim.b[bufnr].conflict_mappings_set = false
 end
@@ -262,9 +226,6 @@ end
 local function parse_buffer(bufnr)
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local conflicts = detect_conflicts(lines)
-
-    local name = vim.api.nvim_buf_get_name(bufnr)
-    visited_buffers_tick[name] = vim.b[bufnr].changedtick
 
     vim.api.nvim_buf_clear_namespace(bufnr, NAMESPACE, 0, -1)
     if #conflicts > 0 then
@@ -318,16 +279,19 @@ end
 ---@param side ConflictSide
 local function insert_lines(positions, side)
     local get_lines = vim.api.nvim_buf_get_lines
+    local sections = { ours = "current", theirs = "incoming", base = "ancestor" }
+
+    local function content(section)
+        return get_lines(0, section.content_start, section.content_end + 1, false)
+    end
 
     for i = #positions, 1, -1 do
         local pos = positions[i]
-        local lines = side == "ours" and get_lines(0, pos.current.content_start, pos.current.content_end + 1, false)
-            or side == "theirs" and get_lines(0, pos.incoming.content_start, pos.incoming.content_end + 1, false)
-            or side == "base" and get_lines(0, pos.ancestor.content_start, pos.ancestor.content_end + 1, false)
-            or side == "both" and vim.list_extend(
-                get_lines(0, pos.current.content_start, pos.current.content_end + 1, false),
-                get_lines(0, pos.incoming.content_start, pos.incoming.content_end + 1, false)
-            )
+        if side == "base" and not pos.ancestor.content_start then
+            return
+        end
+        local lines = sections[side] and content(pos[sections[side]])
+            or side == "both" and vim.list_extend(content(pos.current), content(pos.incoming))
             or side == "none" and {}
             or nil
 
@@ -335,11 +299,10 @@ local function insert_lines(positions, side)
             return
         end
 
-        local pos_start = pos.current.range_start < 0 and 0 or pos.current.range_start
+        local pos_start = pos.current.range_start
         local pos_end = pos.incoming.range_end + 1
 
         vim.api.nvim_buf_set_lines(0, pos_start, pos_end, false, lines)
-        vim.api.nvim_buf_clear_namespace(0, NAMESPACE, pos_start, pos_end)
     end
 end
 
@@ -349,43 +312,30 @@ local function choose(side)
     local conflicts = detect_conflicts(vim.api.nvim_buf_get_lines(0, 0, -1, false))
 
     local mode = vim.fn.mode()
-    if mode == "v" or mode == "V" or mode == "" then
+    local start = vim.api.nvim_win_get_cursor(0)[1] - 1
+    local finish = start
+    local visual = mode == "v" or mode == "V" or mode == "\22"
+    if visual then
+        local anchor = vim.fn.getpos("v")[2] - 1
+        start, finish = math.min(start, anchor), math.max(start, anchor)
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", true)
-        -- Defer to allow `>` and `<` marks to be set
-        vim.defer_fn(function()
-            local start = vim.api.nvim_buf_get_mark(0, "<")[1]
-            local finish = vim.api.nvim_buf_get_mark(0, ">")[1]
-            local positions = vim.iter(conflicts)
-                :filter(function(pos)
-                    return pos.current.range_start >= start - 1 and pos.incoming.range_end <= finish + 1
-                end)
-                :totable()
-            insert_lines(positions, side)
-        end, 50)
-    else
-        local start = unpack(vim.api.nvim_win_get_cursor(0))
-        local positions = vim.iter(conflicts)
-            :filter(function(pos)
-                return pos.current.range_start <= start - 1 and pos.incoming.range_end >= start - 1
-            end)
-            :totable()
-        insert_lines(positions, side)
     end
+    local positions = vim.iter(conflicts)
+        :filter(function(pos)
+            if visual then
+                return pos.current.range_start >= start and pos.incoming.range_end <= finish
+            end
+            return pos.current.range_start <= start and pos.incoming.range_end >= start
+        end)
+        :totable()
+    insert_lines(positions, side)
     parse_buffer(0)
 end
 
 local function create_commands()
     local arguments = { "qf" }
-    local function parse_cmdline(args)
-        return vim.iter(vim.split(args, " "))
-            :filter(function(item)
-                return item ~= ""
-            end)
-            :totable()
-    end
-
     vim.api.nvim_create_user_command("GitConflict", function(c_opts)
-        local args = parse_cmdline(c_opts.args)
+        local args = c_opts.fargs
         if args[1] == "qf" then
             local items = M.conflicts_to_qf_items()
             if #items > 0 then
@@ -397,20 +347,10 @@ local function create_commands()
         end
     end, {
 
-        complete = function(arg_lead, cmdline)
-            local args = parse_cmdline(cmdline)
-            if vim.tbl_contains(arguments, args[2]) then
-                return
-            end
-
-            return vim.iter(arguments)
-                :filter(function(item)
-                    return vim.startswith(item, arg_lead)
-                end)
-                :totable()
+        complete = function()
+            return arguments
         end,
         nargs = "?",
-        range = "%",
         bar = true,
     })
 end
@@ -437,19 +377,10 @@ function M.setup(user_config)
     -- stylua: ignore end
 
     local group = vim.api.nvim_create_augroup("GitConflictCommands", { clear = true })
-    vim.api.nvim_create_autocmd({ "BufRead" }, {
+    vim.api.nvim_create_autocmd({ "BufReadPost", "BufWinEnter", "TextChanged", "TextChangedI" }, {
         group = group,
         callback = function(args)
             parse_buffer(args.buf)
-        end,
-    })
-
-    vim.api.nvim_set_decoration_provider(NAMESPACE, {
-        on_win = function(_, _, bufnr, _, _)
-            local bufname = vim.api.nvim_buf_get_name(bufnr)
-            if visited_buffers_tick[bufname] and visited_buffers_tick[bufname] ~= vim.b[bufnr].changedtick then
-                parse_buffer(bufnr)
-            end
         end,
     })
 end
@@ -472,16 +403,12 @@ function M.conflicts_to_qf_items()
         local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
         local conflicts = detect_conflicts(lines)
         for _, pos in ipairs(conflicts) do
-            for key, value in pairs(pos) do
-                if key == "current" then
-                    table.insert(items, {
-                        filename = full_path,
-                        text = string.format("%s change", key, value.range_start + 1),
-                        valid = 1,
-                        lnum = value.range_start + 1,
-                    })
-                end
-            end
+            items[#items + 1] = {
+                filename = full_path,
+                text = "current change",
+                valid = 1,
+                lnum = pos.current.range_start + 1,
+            }
         end
     end
 
